@@ -35,9 +35,10 @@ import (
 	"go.step.sm/crypto/pemutil"
 	"go.step.sm/crypto/x509util"
 	"golang.org/x/exp/slices"
+	"google.golang.org/api/verifiedaccess/v2"
 
 	"github.com/smallstep/certificates/acme/wire"
-	"github.com/smallstep/certificates/authority/provisioner"
+	//"github.com/smallstep/certificates/authority/provisioner"
 	wireprovisioner "github.com/smallstep/certificates/authority/provisioner/wire"
 	"github.com/smallstep/certificates/internal/cast"
 )
@@ -796,7 +797,6 @@ func deviceAttest01Validate(ctx context.Context, ch *Challenge, db DB, jwk *jose
 	if err != nil {
 		return WrapErrorISE(err, "error loading authorization")
 	}
-
 	// Parse payload.
 	var p payloadType
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -813,7 +813,7 @@ func deviceAttest01Validate(ctx context.Context, ch *Challenge, db DB, jwk *jose
 	}
 
 	if len(attObj) == 0 || bytes.Equal(attObj, []byte("{}")) {
-		return storeError(ctx, db, ch, true, NewDetailedError(ErrorBadAttestationStatementType, "attObj must not be empty"))
+		return storeError(ctx, db, ch, true, NewDetailedError(ErrorBadAttestationStatementType, "attObj must not be empty in %q", payload))
 	}
 
 	cborDecoderOptions := cbor.DecOptions{}
@@ -830,18 +830,17 @@ func deviceAttest01Validate(ctx context.Context, ch *Challenge, db DB, jwk *jose
 	if err := cborDecoder.Unmarshal(attObj, &att); err != nil {
 		return WrapErrorISE(err, "failed unmarshalling CBOR")
 	}
-
 	format := att.Format
+
 	prov := MustProvisionerFromContext(ctx)
-	if !prov.IsAttestationFormatEnabled(ctx, provisioner.ACMEAttestationFormat(format)) {
-		if format != "apple" && format != "step" && format != "tpm" {
+	// JAY TODO figure out how to add new format config so we can re-enable this.
+	/*if !prov.IsAttestationFormatEnabled(ctx, provisioner.ACMEAttestationFormat(format)) {
+		if format != "apple" && format != "step" && format != "tpm" && format != "chromeos" {
 			return storeError(ctx, db, ch, true, NewDetailedError(ErrorBadAttestationStatementType, "unsupported attestation object format %q", format))
 		}
-
 		return storeError(ctx, db, ch, true,
 			NewError(ErrorBadAttestationStatementType, "attestation format %q is not enabled", format))
-	}
-
+	} */
 	switch format {
 	case "apple":
 		data, err := doAppleAttestationFormat(ctx, prov, ch, &att)
@@ -879,6 +878,40 @@ func deviceAttest01Validate(ctx context.Context, ch *Challenge, db DB, jwk *jose
 
 		// Update attestation key fingerprint to compare against the CSR
 		az.Fingerprint = data.Fingerprint
+	case "chromeos":
+		data, err := doChromeOSVerifiedAccessFormat(ctx, prov, ch, jwk, &att)
+		if err != nil {
+			var acmeError *Error
+			if errors.As(err, &acmeError) {
+                                if acmeError.Status == 500 {
+                                        return acmeError
+                                }
+                                return storeError(ctx, db, ch, true, acmeError)
+                        }
+                        return WrapErrorISE(err, "error validating attestation")
+                }
+
+		// JAY TODO - figure out how to parse the SPKAC format CSR returned by verify() and
+		//   extract a public key which we can later compare to the public key of the CSR
+		//   the ACME client sends in a later step. If the public keys match then the private
+		//   keys match and we can be sure we're signing a certificate for the same private key.
+
+                // Validate the ChromeOS device serial number from the attestation
+                // certificate with the challenged Order value.
+                //
+                // Note: We might want to use an external service for this.
+                //if data.SerialNumber != ch.Value {
+                //        subproblem := NewSubproblemWithIdentifier(
+                //                ErrorRejectedIdentifierType,
+                //                Identifier{Type: "permanent-identifier", Value: ch.Value},
+                //                "challenge identifier %q doesn't match the attested hardware identifier %q", ch.Value, data.SerialNumber,
+                //        )
+                //        return storeError(ctx, db, ch, true, NewDetailedError(ErrorBadAttestationStatementType, "permanent identifier does not match").AddSubproblems(subproblem))
+                //}
+
+                // Update attestation key fingerprint to compare against the CSR
+                //az.SignedPublicKeyAndChallenge = data.SignedPublicKeyAndChallenge
+
 	case "step":
 		data, err := doStepAttestationFormat(ctx, prov, ch, jwk, &att)
 		if err != nil {
@@ -1000,7 +1033,7 @@ func doTPMAttestationFormat(_ context.Context, prov Provisioner, ch *Challenge, 
 	if len(x5c) == 0 {
 		return nil, NewDetailedError(ErrorBadAttestationStatementType, "x5c is empty")
 	}
-
+        
 	akCertBytes, ok := x5c[0].([]byte)
 	if !ok {
 		return nil, NewDetailedError(ErrorBadAttestationStatementType, "x5c is malformed")
@@ -1397,6 +1430,31 @@ type stepAttestationData struct {
 	Certificate  *x509.Certificate
 	SerialNumber string
 	Fingerprint  string
+}
+
+func doChromeOSVerifiedAccessFormat(_ context.Context, prov Provisioner, ch *Challenge, jwk *jose.JSONWebKey, att *attestationObject) (*verifiedaccess.VerifyChallengeResponseResult, error) {
+	challenge_response, ok := att.AttStatement["challenge_response"].(string)
+	if !ok {
+                return nil, NewDetailedError(ErrorBadAttestationStatementType, "challenge_response not present")
+        }
+        ctx := context.Background()
+	va_svc, err := verifiedaccess.NewService(ctx)
+	if err != nil {
+		return nil, WrapDetailedError(ErrorBadAttestationStatementType, err, "Failed to create verifiedaccess client: %v\n", err)
+	}
+
+	resp_request := &verifiedaccess.VerifyChallengeResponseRequest{
+		ChallengeResponse: challenge_response,
+	}
+	verifyResponse, err := va_svc.Challenge.Verify(resp_request).Fields("*",).Do()
+	if err != nil {
+		return nil, WrapDetailedError(ErrorBadAttestationStatementType, err, "Failed to call verifiedaccess API: %v\n", err)
+        }
+	if verifyResponse.ServerResponse.HTTPStatusCode != 200 {
+		return nil, WrapDetailedError(ErrorBadAttestationStatementType, err, "Google API returned non-200 status: %v\n", verifyResponse.ServerResponse.HTTPStatusCode)
+	}
+
+	return verifyResponse, nil
 }
 
 func doStepAttestationFormat(_ context.Context, prov Provisioner, ch *Challenge, jwk *jose.JSONWebKey, att *attestationObject) (*stepAttestationData, error) {

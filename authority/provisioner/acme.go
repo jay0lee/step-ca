@@ -64,6 +64,9 @@ const (
 
 	// TPM is the format used to enable device-attest-01 with TPMs.
 	TPM ACMEAttestationFormat = "tpm"
+
+	// CHROMEOS is the format used to enable device-attest-01 with ChromeOS devices.
+	CHROMEOS ACMEAttestationFormat = "chromeos"
 )
 
 // String returns a normalized version of the attestation format.
@@ -74,7 +77,7 @@ func (f ACMEAttestationFormat) String() string {
 // Validate returns an error if the attestation format is not a valid one.
 func (f ACMEAttestationFormat) Validate() error {
 	switch ACMEAttestationFormat(f.String()) {
-	case APPLE, STEP, TPM:
+	case APPLE, STEP, TPM, CHROMEOS:
 		return nil
 	default:
 		return fmt.Errorf("acme attestation format %q is not supported", f)
@@ -371,7 +374,7 @@ func (p *ACME) IsChallengeEnabled(_ context.Context, challenge ACMEChallenge) bo
 // AttestationFormat provisioner property should have at least one element.
 func (p *ACME) IsAttestationFormatEnabled(_ context.Context, format ACMEAttestationFormat) bool {
 	enabledFormats := []ACMEAttestationFormat{
-		APPLE, STEP, TPM,
+		APPLE, STEP, TPM, CHROMEOS,
 	}
 	if len(p.AttestationFormats) > 0 {
 		enabledFormats = p.AttestationFormats

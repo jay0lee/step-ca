@@ -1364,6 +1364,8 @@ func attestationFormatsToCertificates(formats []linkedca.ACMEProvisioner_Attesta
 			ret = append(ret, provisioner.STEP)
 		case linkedca.ACMEProvisioner_TPM:
 			ret = append(ret, provisioner.TPM)
+		case linkedca.ACMEProvisioner_CHROMEOS:
+			ret = append(ret, provisioner.CHROMEOS)
 		}
 	}
 	return ret
@@ -1381,6 +1383,8 @@ func attestationFormatsToLinkedca(formats []provisioner.ACMEAttestationFormat) [
 			ret = append(ret, linkedca.ACMEProvisioner_STEP)
 		case provisioner.TPM:
 			ret = append(ret, linkedca.ACMEProvisioner_TPM)
+		case provisioner.CHROMEOS:
+			ret = append(ret, linkedca.ACMEProvisioner_CHROMEOS)
 		}
 	}
 	return ret
